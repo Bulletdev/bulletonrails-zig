@@ -3,9 +3,9 @@ const handler = @import("handler.zig");
 const index = @import("index.zig");
 
 const PORT: u16 = 9999;
-// 4 threads: CPU-bound IVF keeps ~0.45 vCPU pegged; 4 threads overlap network I/O
-// with compute across concurrent keep-alive connections without excessive context switches.
-const THREADS: usize = 4;
+// 64 threads: blocking accept() model — each thread holds one connection at a time.
+// 64 threads × 256KB stack = 16MB; well within the 160MB container limit.
+const THREADS: usize = 64;
 
 // Embed the index at compile time — zero cold-start, no disk I/O on startup.
 const IDX_BYTES: []const u8 = @import("index_embed").bytes;
@@ -50,7 +50,7 @@ pub fn main() !void {
 
     var threads: [THREADS - 1]std.Thread = undefined;
     for (&threads) |*t| {
-        t.* = try std.Thread.spawn(.{}, workerFn, .{arg});
+        t.* = try std.Thread.spawn(.{ .stack_size = 256 * 1024 }, workerFn, .{arg});
         t.detach();
     }
     workerFn(arg);
