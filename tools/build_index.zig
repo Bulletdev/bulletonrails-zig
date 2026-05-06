@@ -12,7 +12,7 @@ pub const SCALE: i16 = 5000; // max diff=10000, max diff^2=1e8, max sum(14)=1.4e
 
 // Magic "IVF2" as little-endian u32
 const MAGIC: u32 = 0x32465649;
-const VERSION: u32 = 1;
+const VERSION: u32 = 2; // v2 adds bbox_min/bbox_max per cluster for exact KNN
 const NPROBE_DEFAULT: u32 = 8;
 const NPROBE_BOUNDARY: u32 = 24;
 
@@ -175,10 +175,12 @@ fn quantize(v: f32) i16 {
 }
 
 // Index binary format (all little-endian):
-//   u32 magic, u32 version, u32 K, u32 DIM, u32 nprobe_default, u32 nprobe_boundary, i32 scale
+//   u32 magic, u32 version(=2), u32 K, u32 DIM, u32 nprobe_default, u32 nprobe_boundary, i32 scale
 //   K * DIM * f32   (centroids)
 //   for each cluster k in 0..K:
 //     u32 count, u32 block_count
+//     DIM * i16 bbox_min   (v2: quantized min per dimension)
+//     DIM * i16 bbox_max   (v2: quantized max per dimension)
 //     for each block b in 0..block_count:
 //       16 bytes labels (1 per vector in block, padded with 0)
 //       16 * DIM * i16 data  (AoSoA16: 16 vectors interleaved by dimension)
@@ -222,6 +224,22 @@ fn writeIndex(gpa: std.mem.Allocator, path: []const u8, centroids: [][DIM]f32, p
         try writeU32(w, cnt);
         try writeU32(w, blk_cnt);
 
+        // bbox_min/max per dimension (v2): enables exact KNN via lower bound pruning
+        var bbox_min: [DIM]i16 = [_]i16{std.math.maxInt(i16)} ** DIM;
+        var bbox_max: [DIM]i16 = [_]i16{std.math.minInt(i16)} ** DIM;
+        for (cl.items) |cv| {
+            for (0..DIM) |d| {
+                if (cv.qi[d] < bbox_min[d]) bbox_min[d] = cv.qi[d];
+                if (cv.qi[d] > bbox_max[d]) bbox_max[d] = cv.qi[d];
+            }
+        }
+        if (cl.items.len == 0) {
+            bbox_min = [_]i16{0} ** DIM;
+            bbox_max = [_]i16{0} ** DIM;
+        }
+        for (bbox_min) |v| try writeI16(w, v);
+        for (bbox_max) |v| try writeI16(w, v);
+
         for (0..blk_cnt) |bi| {
             const start = bi * 16;
             const end = @min(start + 16, cl.items.len);
@@ -232,7 +250,6 @@ fn writeIndex(gpa: std.mem.Allocator, path: []const u8, centroids: [][DIM]f32, p
             for (n..16) |_| try w.writeByte(0);
 
             // AoSoA16 dimension-major layout: block[dim][vec] = [DIM][16]i16
-            // Enables AVX2: load block[d][0..16] as @Vector(16,i16) per dim iteration
             for (0..DIM) |d| {
                 for (0..16) |j| {
                     const v: i16 = if (j < n) cl.items[start + j].qi[d] else 0;

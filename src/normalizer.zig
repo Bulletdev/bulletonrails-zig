@@ -68,7 +68,7 @@ fn clamp(val: f32) f32 {
 }
 
 fn amountRatio(amount: f64, avg: f64) f32 {
-    if (avg == 0.0) return 0.0;
+    if (avg == 0.0) return 1.0;
     return clamp(@as(f32, @floatCast((amount / avg) / AMOUNT_VS_AVG_RATIO)));
 }
 

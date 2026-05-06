@@ -1,5 +1,5 @@
 // Loads index.bin into memory and provides IVF search.
-// Phase 2: int16 vectors, float32 centroid distances, nprobe clusters visited.
+// v2: bbox lower bound pruning for exact KNN — guarantees 100% accuracy.
 
 const std = @import("std");
 
@@ -12,11 +12,10 @@ const KNN: usize = 5;
 
 const Cluster = struct {
     count: u32,
-    // labels: one per vector (0=legit, 1=fraud), interleaved in blocks of 16
     labels: []u8,
-    // vectors: count vectors of DIM i16, stored in blocks of 16
-    // block layout: [vec_in_block][dim] i16, 16 vecs per block
     blocks: [][16 * DIM]i16,
+    bbox_min: [DIM]i16,
+    bbox_max: [DIM]i16,
 
     fn deinit(self: *Cluster, gpa: std.mem.Allocator) void {
         gpa.free(self.labels);
@@ -37,31 +36,28 @@ pub const IvfIndex = struct {
         self.allocator.free(self.centroids);
     }
 
+    // Exact KNN via bbox lower bound pruning.
+    // Step 1: scan nearest centroid cluster to get initial top-5.
+    // Step 2: for every other cluster, compute the minimum possible distance
+    //         from query to any point in that cluster using the bbox.
+    //         If bbox_lower_bound <= worst top-5 dist, cluster may improve top-5 -> scan it.
+    //         Otherwise, skip. Mathematically guarantees exact KNN.
     pub fn search(self: *const IvfIndex, query_f32: [DIM]f32) u8 {
-        const query = quantizeVec(query_f32);
-        const query_f = query_f32; // for centroid distance
-        const np = self.nprobe_default;
+        const q = quantizeVec(query_f32);
 
-        const fraud = self.searchWithNprobe(query, query_f, np);
-        if (fraud == 2 or fraud == 3) {
-            return self.searchWithNprobe(query, query_f, self.nprobe_boundary);
-        }
-        return fraud;
-    }
-
-    fn searchWithNprobe(self: *const IvfIndex, query_i16: [DIM]i16, query_f32: [DIM]f32, nprobe: u32) u8 {
-        var probe_buf: [64]u32 = undefined; // nprobe_boundary = 24 max
-        const np = @min(nprobe, 64);
-        const probes = probe_buf[0..np];
-        nearestCentroids(self.centroids, query_f32, probes);
-
-        // Top-5 heap: dists[0] is the farthest (worst best so far)
         var top5_dist: [KNN]i64 = [_]i64{std.math.maxInt(i64)} ** KNN;
         var top5_lbl: [KNN]u8 = [_]u8{0} ** KNN;
 
-        for (probes) |ci| {
-            const cl = &self.clusters[ci];
-            scanCluster(cl, query_i16, &top5_dist, &top5_lbl);
+        // Find nearest centroid and scan it first
+        const nearest = nearestCentroid(self.centroids, query_f32);
+        scanCluster(&self.clusters[nearest], q, &top5_dist, &top5_lbl);
+
+        // Bbox pruning over all other clusters
+        for (self.clusters, 0..) |*cl, ci| {
+            if (ci == nearest) continue;
+            if (bboxLowerBound(cl.bbox_min, cl.bbox_max, q) <= top5_dist[KNN - 1]) {
+                scanCluster(cl, q, &top5_dist, &top5_lbl);
+            }
         }
 
         var fraud: u8 = 0;
@@ -79,58 +75,33 @@ fn quantizeVec(v: [DIM]f32) [DIM]i16 {
     return out;
 }
 
-// O(K*log(nprobe)) via max-heap instead of O(K*nprobe) repeated selection.
-fn nearestCentroids(centroids: [][DIM]f32, q: [DIM]f32, out: []u32) void {
-    const np = out.len;
-    var h_dist: [64]f32 = [_]f32{std.math.inf(f32)} ** 64;
-    var h_idx: [64]u32 = [_]u32{0} ** 64;
-    var h_size: usize = 0;
-
+// Returns the index of the single nearest centroid (O(K) linear scan).
+fn nearestCentroid(centroids: [][DIM]f32, q: [DIM]f32) usize {
+    var best_dist: f32 = std.math.inf(f32);
+    var best_idx: usize = 0;
     for (centroids, 0..) |c, i| {
         var s: f32 = 0;
         for (0..DIM) |d| { const diff = q[d] - c[d]; s += diff * diff; }
-
-        if (h_size < np) {
-            h_dist[h_size] = s;
-            h_idx[h_size] = @intCast(i);
-            h_size += 1;
-            if (h_size == np) heapify(h_dist[0..np], h_idx[0..np]);
-        } else if (s < h_dist[0]) {
-            h_dist[0] = s;
-            h_idx[0] = @intCast(i);
-            siftDown(h_dist[0..np], h_idx[0..np], 0);
-        }
+        if (s < best_dist) { best_dist = s; best_idx = i; }
     }
-
-    // Extract smallest-first by repeatedly removing the max (heap sort).
-    var size = h_size;
-    while (size > 0) {
-        size -= 1;
-        out[size] = h_idx[0];
-        h_dist[0] = h_dist[size];
-        h_idx[0] = h_idx[size];
-        if (size > 0) siftDown(h_dist[0..size], h_idx[0..size], 0);
-    }
+    return best_idx;
 }
 
-fn heapify(d: []f32, idx: []u32) void {
-    var i: isize = @intCast(d.len / 2);
-    while (i >= 0) : (i -= 1) siftDown(d, idx, @intCast(i));
-}
-
-fn siftDown(d: []f32, idx: []u32, root: usize) void {
-    var r = root;
-    while (true) {
-        var largest = r;
-        const l = 2 * r + 1;
-        const right = l + 1;
-        if (l < d.len and d[l] > d[largest]) largest = l;
-        if (right < d.len and d[right] > d[largest]) largest = right;
-        if (largest == r) break;
-        std.mem.swap(f32, &d[r], &d[largest]);
-        std.mem.swap(u32, &idx[r], &idx[largest]);
-        r = largest;
+// Minimum possible squared L2 distance from query q to any point in the cluster bbox.
+// If a dimension's query value is inside [min,max], that dimension contributes 0.
+// Guarantees: actual_dist >= bboxLowerBound for all points in cluster.
+fn bboxLowerBound(bbox_min: [DIM]i16, bbox_max: [DIM]i16, q: [DIM]i16) i64 {
+    var s: i64 = 0;
+    for (0..DIM) |d| {
+        const d_val: i32 = if (q[d] < bbox_min[d])
+            @as(i32, bbox_min[d]) - @as(i32, q[d])
+        else if (q[d] > bbox_max[d])
+            @as(i32, q[d]) - @as(i32, bbox_max[d])
+        else
+            0;
+        s += @as(i64, d_val) * @as(i64, d_val);
     }
+    return s;
 }
 
 // SIMD: process 16 vectors per block simultaneously (AVX2 = 256-bit = 16×i16 or 8×i32).
@@ -213,7 +184,7 @@ fn parse(gpa: std.mem.Allocator, data: []const u8) !IvfIndex {
     const magic = readU32(data, &pos);
     if (magic != MAGIC) return error.InvalidMagic;
     const version = readU32(data, &pos);
-    if (version != 1) return error.UnsupportedVersion;
+    if (version != 2) return error.UnsupportedVersion;
     const k = readU32(data, &pos);
     const dim = readU32(data, &pos);
     if (k != K_CLUSTERS or dim != DIM) return error.DimensionMismatch;
@@ -239,6 +210,12 @@ fn parse(gpa: std.mem.Allocator, data: []const u8) !IvfIndex {
         const count = readU32(data, &pos);
         const block_count = readU32(data, &pos);
 
+        // v2: bbox_min/max per cluster for exact KNN pruning
+        var bbox_min: [DIM]i16 = undefined;
+        var bbox_max: [DIM]i16 = undefined;
+        for (0..DIM) |d| bbox_min[d] = readI16(data, &pos);
+        for (0..DIM) |d| bbox_max[d] = readI16(data, &pos);
+
         const labels = try gpa.alloc(u8, count);
         const blocks = try gpa.alloc([16 * DIM]i16, block_count);
 
@@ -252,7 +229,7 @@ fn parse(gpa: std.mem.Allocator, data: []const u8) !IvfIndex {
             for (0..16 * DIM) |j| blocks[blk_i][j] = readI16(data, &pos);
         }
 
-        clusters[loaded] = .{ .count = count, .labels = labels, .blocks = blocks };
+        clusters[loaded] = .{ .count = count, .labels = labels, .blocks = blocks, .bbox_min = bbox_min, .bbox_max = bbox_max };
     }
 
     return .{

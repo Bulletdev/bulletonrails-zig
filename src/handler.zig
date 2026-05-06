@@ -15,10 +15,8 @@ pub fn handleConnection(ctx: ConnContext) void {
     server.setTcpNoDelay(ctx.stream);
     defer ctx.stream.close();
     var buf: [16384]u8 = undefined;
-    while (true) {
-        const req = server.readRequest(ctx.stream, &buf) catch break;
-        dispatch(ctx, req);
-    }
+    const req = server.readRequest(ctx.stream, &buf) catch return;
+    dispatch(ctx, req);
 }
 
 fn dispatch(ctx: ConnContext, req: server.Request) void {

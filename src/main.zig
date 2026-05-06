@@ -3,10 +3,10 @@ const handler = @import("handler.zig");
 const index = @import("index.zig");
 
 const PORT: u16 = 9999;
-// 256 threads: blocking accept/keep-alive model, one thread per connection.
-// maxVUs=250 → 125 connections per instance; 256 threads gives 131 spare → no starvation.
-// 256 × 256KB = 64MB stack; well within the 160MB container limit.
-const THREADS: usize = 256;
+// 32 threads: Connection:close model, one request per connection.
+// Each thread accepts a connection, serves one request, closes immediately.
+// Low thread count avoids cgroup runqueue pressure under 0.45 vCPU throttle.
+const THREADS: usize = 32;
 
 // Embed the index at compile time — zero cold-start, no disk I/O on startup.
 const IDX_BYTES: []const u8 = @import("index_embed").bytes;

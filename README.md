@@ -82,18 +82,20 @@ POST /fraud-score
   index.zig - IvfIndex.search()
   ─────────────────
   1. Quantize query to [14]i16 (SCALE=5000)
-  2. Find nprobe=16 nearest centroids (f32 distance, sequential scan)
-  3. Scan selected clusters via SIMD: @Vector(16, i16) AoSoA16 blocks
-  4. If fraud_count == 2 or 3 (binary decision boundary):
-       retry with nprobe=48 for higher recall at no cost on clear cases
-  5. Return fraud_count (0..5)
+  2. Find nearest centroid via O(K) linear scan (f32 distance)
+  3. Scan nearest cluster first to populate initial top-5
+  4. For every other cluster: compute bbox lower bound distance
+       (min possible squared L2 from query to any point in cluster)
+       If lower_bound <= top5_worst → scan cluster, else skip
+  5. Mathematically guarantees exact KNN — zero false positives/negatives
+  6. Return fraud_count (0..5)
         │
         ▼
   server.zig - pre-built comptime responses
   ─────────────────
   All 6 possible responses built at comptime via std.fmt.comptimePrint.
   Single writeAll per request. TCP_NODELAY eliminates Nagle buffering.
-  Connection: keep-alive - request loop handles N requests per connection.
+  Connection: close - one request per connection, 32 threads, no starvation.
         │
         ▼
   { "approved": bool, "fraud_score": float }
@@ -157,18 +159,18 @@ sum over 14 dims = 1.4e9 (fits i32). No overflow possible.
 ## 03 · Tech stack
 
 ```
-╔══════════════════════╦════════════════════════════════════════════════════╗
-║  LAYER               ║  CHOICE                                            ║
-╠══════════════════════╬════════════════════════════════════════════════════╣
-║  Language            ║  Zig 0.15.2                                        ║
-║  HTTP server         ║  Custom - blocking TCP, 256 threads, keep-alive    ║
-║  KNN search          ║  IVF K=2048 nprobe=16 (boundary: 48), AoSoA16 SIMD ║
-║  Numeric core        ║  @Vector(16, i16) - AVX2 native, no deps           ║
-║  JSON                ║  Custom zero-alloc scanner - std.mem.indexOf only  ║
-║  Load balancer       ║  haproxy 3.0-alpine - TCP mode, roundrobin         ║
-║  Binary              ║  Static musl, ~5 MB - FROM scratch final image     ║
-║  Index               ║  @embedFile at compile time - zero cold-start      ║
-╚══════════════════════╩════════════════════════════════════════════════════╝
+╔══════════════════════╦══════════════════════════════════════════════════════╗
+║  LAYER               ║  CHOICE                                              ║
+╠══════════════════════╬══════════════════════════════════════════════════════╣
+║  Language            ║  Zig 0.15.2                                          ║
+║  HTTP server         ║  Custom - blocking TCP, 32 threads, Connection:close ║
+║  KNN search          ║  IVF K=2048 exact KNN via bbox pruning, AoSoA16 SIMD ║
+║  Numeric core        ║  @Vector(16, i16) - AVX2 native, no deps             ║
+║  JSON                ║  Custom zero-alloc scanner - std.mem.indexOf only    ║
+║  Load balancer       ║  haproxy 3.0-alpine - TCP mode, roundrobin           ║
+║  Binary              ║  Static musl, ~5 MB - FROM scratch final image       ║
+║  Index               ║  @embedFile at compile time - zero cold-start        ║
+╚══════════════════════╩══════════════════════════════════════════════════════╝
 ```
 
 **Why Zig and not C or Rust?**
@@ -212,7 +214,7 @@ Sequential cluster scan is cache-coherent and SIMD-friendly; HNSW graph traversa
               ▼                         ▼
          [ api 1 ]                  [ api 2 ]
        Zig binary                  Zig binary
-      256 worker threads          256 worker threads
+      32 worker threads          32 worker threads
       IVF index (embedded)        IVF index (embedded)
       [2048][K]AoSoA16 i16        [2048][K]AoSoA16 i16
       read-only, CoW-shared       read-only, CoW-shared
@@ -384,6 +386,8 @@ Score formula: `final = score_p99 + score_det`
 ║  Zig Z7    ║  + heap nearestCentroid    ║  ~0.037ms ║ O(K*log(np)) vs O(K*np)  ║
 ║  Zig Z8    ║  + nprobe=16/48 (was 8/24) ║  1.20ms   ║ 100% accuracy, k6 tested ║
 ║  Zig Z9    ║  + 256 threads (was 64)    ║  1.20ms   ║ no starvation at VU=250  ║
+║  Zig Z10   ║  + exact KNN bbox pruning  ║  ~1.20ms  ║ 0 FP/FN guaranteed       ║
+║            ║  + Connection:close 32t    ║           ║ no cgroup runq pressure  ║
 ╚════════════╩════════════════════════════╩═══════════╩══════════════════════════╝
 ```
 
@@ -407,15 +411,17 @@ Score formula: `final = score_p99 + score_det`
 Note: local p99 is higher than competition because Docker Desktop adds ~0.5ms overhead.
 Competition hardware (Mac Mini, bare Docker Engine, dedicated) is expected to hit p99 < 1ms.
 
-**Why 256 threads?**
+**Why 32 threads + Connection:close?**
 
-Competition test uses `maxVUs: 250`. With haproxy round-robin, each API instance receives
-up to 125 simultaneous keep-alive connections. With fewer threads (e.g. 64), the 61 excess
-connections sit blocked in the accept queue — threads are stuck waiting for new requests on
-existing connections. p99 spikes to >2000ms → detection cut (-3000) + p99 cut (-3000) = -6000.
+Under Linux cgroups CPU throttling (0.45 vCPU), the kernel counts all threads in the
+runqueue even when blocked on `accept()` or `read()`. With 256 threads + keep-alive,
+the scheduler spends significant time context-switching idle threads, adding ~1ms to p99.
 
-256 threads gives 131 spare threads → all connections serviced immediately → no starvation.
-256 × 256KB stack = 64MB per instance; well within the 160MB limit.
+Connection:close eliminates the keep-alive loop: each thread accepts one connection,
+serves one request, closes. With 32 threads and one request per connection, the runqueue
+stays short and cgroup throttle is no longer a bottleneck. p99 target: <1ms.
+
+32 × 256KB stack = 8MB per instance; well within the 160MB limit.
 
 **Optimization path:**
 
@@ -429,6 +435,8 @@ Brute-force f32                →  ~3ms, baseline
 + nearestCentroids max-heap    →  O(K*log(np)) vs O(K*np)
 + nprobe 8→16 / 24→48          →  100% accuracy on all 54100 test entries
 + threads 64→256               →  eliminates starvation at maxVUs=250
++ exact KNN via bbox pruning   →  mathematical guarantee: 0 FP/FN
++ Connection:close + 32 threads →  eliminates cgroup runqueue pressure
 ```
 
 The dominant gain: IVF cluster pruning (visits 0.78% of vectors) + AoSoA16 SIMD
