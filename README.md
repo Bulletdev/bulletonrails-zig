@@ -82,10 +82,10 @@ POST /fraud-score
   index.zig - IvfIndex.search()
   ─────────────────
   1. Quantize query to [14]i16 (SCALE=5000)
-  2. Find nprobe=8 nearest centroids (f32 distance, sequential scan)
+  2. Find nprobe=16 nearest centroids (f32 distance, sequential scan)
   3. Scan selected clusters via SIMD: @Vector(16, i16) AoSoA16 blocks
   4. If fraud_count == 2 or 3 (binary decision boundary):
-       retry with nprobe=24 for higher recall at no cost on clear cases
+       retry with nprobe=48 for higher recall at no cost on clear cases
   5. Return fraud_count (0..5)
         │
         ▼
@@ -161,8 +161,8 @@ sum over 14 dims = 1.4e9 (fits i32). No overflow possible.
 ║  LAYER               ║  CHOICE                                            ║
 ╠══════════════════════╬════════════════════════════════════════════════════╣
 ║  Language            ║  Zig 0.15.2                                        ║
-║  HTTP server         ║  Custom - blocking TCP, 4 threads, keep-alive      ║
-║  KNN search          ║  IVF K=2048 nprobe=8 (boundary: 24), AoSoA16 SIMD  ║
+║  HTTP server         ║  Custom - blocking TCP, 256 threads, keep-alive    ║
+║  KNN search          ║  IVF K=2048 nprobe=16 (boundary: 48), AoSoA16 SIMD ║
 ║  Numeric core        ║  @Vector(16, i16) - AVX2 native, no deps           ║
 ║  JSON                ║  Custom zero-alloc scanner - std.mem.indexOf only  ║
 ║  Load balancer       ║  haproxy 3.0-alpine - TCP mode, roundrobin         ║
@@ -197,7 +197,7 @@ p50 from 0.86ms to 0.32ms). Keep-alive eliminates TCP handshake per request.
 | HNSW ef=200      | ~2.5ms floor   | Random memory access = constant misses   |
 | IVF K=2048 SIMD  | ~0.72ms        | Sequential cluster scan, AVX2-friendly   |
 
-IVF with K=2048 clusters visits 8/2048 = 0.39% of vectors on typical queries.
+IVF with K=2048 clusters visits 16/2048 = 0.78% of vectors on typical queries.
 Sequential cluster scan is cache-coherent and SIMD-friendly; HNSW graph traversal is neither.
 
 ---
@@ -212,7 +212,7 @@ Sequential cluster scan is cache-coherent and SIMD-friendly; HNSW graph traversa
               ▼                         ▼
          [ api 1 ]                  [ api 2 ]
        Zig binary                  Zig binary
-      4 worker threads            4 worker threads
+      256 worker threads          256 worker threads
       IVF index (embedded)        IVF index (embedded)
       [2048][K]AoSoA16 i16        [2048][K]AoSoA16 i16
       read-only, CoW-shared       read-only, CoW-shared
@@ -234,7 +234,7 @@ Sequential cluster scan is cache-coherent and SIMD-friendly; HNSW graph traversa
 
 Limit: 1 CPU / 350 MB. Used: 1.00 CPU / 340 MB.
 
-Binary RSS: ~8 MB (5.6 MB binary + index embedded + thread stacks).
+Binary RSS: ~14 MB (5.6 MB binary + index embedded + 256 thread stacks × 256KB).
 GC: none. Allocations: only at startup (index parsing). Hot path: zero alloc.
 
 ---
@@ -354,8 +354,8 @@ Error distribution (brute_fc → ivf_fc):
 
 The 99.85%+ agreement uses the same approval threshold as the scorer: errors that cross
 the `fraud_count >= 3` boundary (approve/deny boundary) are the only ones that affect
-detection score. The boundary retry (nprobe=24 when fraud_count == 2 or 3) catches
-the majority of those.
+detection score. The boundary retry (nprobe=48 when fraud_count == 2 or 3) catches
+the majority of those. With nprobe=16/48, all 54100 test entries pass with 0 FP/FN.
 
 </details>
 
@@ -368,72 +368,70 @@ Score formula: `final = score_p99 + score_det`
 `score_p99 = max(-3000, min(3000, 1000 * log10(1000ms / p99)))`
 
 ```
-╔════════════════════════════════════════════════════════════════════════════╗
-║  EVOLUTION                                                                 ║
-╠════════════╦══════════════════════════╦═══════════╦════════════════════════╣
-║  Impl      ║  What                    ║  p99      ║  notes                 ║
-╠════════════╬══════════════════════════╬═══════════╬════════════════════════╣
-║  Ruby R11  ║  FAISS IVF nlist=64      ║  ~1.5ms   ║  last Ruby run est.    ║
-╠════════════╬══════════════════════════╬═══════════╬════════════════════════╣
-║  Zig Z1    ║  Brute-force f32         ║  ~3ms     ║ baseline, no SIMD      ║
-║  Zig Z2    ║  IVF K=2048 nprobe=8     ║  ~1.5ms   ║ no SIMD yet            ║
-║  Zig Z3    ║  + AoSoA16 @Vector SIMD  ║  ~0.05ms  ║ AVX2, haswell target   ║
-║  Zig Z4    ║  + TCP_NODELAY           ║  ~0.04ms  ║ eliminates Nagle       ║
-║  Zig Z5    ║  + comptime responses    ║  ~0.04ms  ║ single writeAll/req    ║
-║  Zig Z6    ║  + HTTP keep-alive       ║  ~0.04ms  ║ no TCP handshake/req   ║
-║  Zig Z7    ║  + heap nearestCentroid  ║  ~0.037ms ║ O(K*log(np)) vs O(K*np)║
-╚════════════╩══════════════════════════╩═══════════╩════════════════════════╝
+╔════════════════════════════════════════════════════════════════════════════════╗
+║  EVOLUTION                                                                     ║
+╠════════════╦════════════════════════════╦═══════════╦══════════════════════════╣
+║  Impl      ║  What                      ║  p99      ║  notes                   ║
+╠════════════╬════════════════════════════╬═══════════╬══════════════════════════╣
+║  Ruby R11  ║  FAISS IVF nlist=64        ║  ~1.5ms   ║  last Ruby run est.      ║
+╠════════════╬════════════════════════════╬═══════════╬══════════════════════════╣
+║  Zig Z1    ║  Brute-force f32           ║  ~3ms     ║ baseline, no SIMD        ║
+║  Zig Z2    ║  IVF K=2048 nprobe=8       ║  ~1.5ms   ║ no SIMD yet              ║
+║  Zig Z3    ║  + AoSoA16 @Vector SIMD    ║  ~0.05ms  ║ AVX2, haswell target     ║
+║  Zig Z4    ║  + TCP_NODELAY             ║  ~0.04ms  ║ eliminates Nagle         ║
+║  Zig Z5    ║  + comptime responses      ║  ~0.04ms  ║ single writeAll/req      ║
+║  Zig Z6    ║  + HTTP keep-alive         ║  ~0.04ms  ║ no TCP handshake/req     ║
+║  Zig Z7    ║  + heap nearestCentroid    ║  ~0.037ms ║ O(K*log(np)) vs O(K*np)  ║
+║  Zig Z8    ║  + nprobe=16/48 (was 8/24) ║  1.20ms   ║ 100% accuracy, k6 tested ║
+║  Zig Z9    ║  + 256 threads (was 64)    ║  1.20ms   ║ no starvation at VU=250  ║
+╚════════════╩════════════════════════════╩═══════════╩══════════════════════════╝
 ```
 
-**Current benchmark - local dev machine (full CPU, not throttled):**
+**k6 benchmark — local Docker, ramping arrival rate 1→650 RPS (competition test format):**
 
 ```
-╔═══════════════════════════════════════════════════════════════╗
-║  fraud-score keep-alive benchmark (Python HTTP client)        ║
-╠═══════════════════════╦═══════════════════════════════════════╣
-║  conns=1              ║  6,117 rps   total ~0.163ms/req       ║
-║  conns=2              ║  7,517 rps   total ~0.133ms/req       ║
-║  conns=4              ║  7,299 rps   total ~0.137ms/req       ║
-║  conns=8              ║  7,267 rps   total ~0.138ms/req       ║
-║  conns=16             ║  7,173 rps   total ~0.139ms/req       ║
-╠═══════════════════════╩═══════════════════════════════════════╣
-║  Per-request breakdown (server-side timer, warm cache):       ║
-║    parse=3us  norm=0us  ivf=24us  write=9us  total=37us       ║
-╚═══════════════════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════════════════╗
+║  k6 ramping-arrival-rate (local) · 256 threads · keep-alive          ║
+╠═══════════════════════════╦══════════════════════════════════════════╣
+║  Total requests           ║  14 354                                  ║
+║  HTTP errors              ║  0                                       ║
+║  False positives          ║  0                                       ║
+║  False negatives          ║  0                                       ║
+║  p99                      ║  1.20 ms                                 ║
+║  p99 score                ║  2922  (formula: 1000*log10(1000/1.20))  ║
+║  detection score          ║  3000  (0 errors → epsilon=0 → max)      ║
+║  final score              ║  5922 / 6000                             ║
+╚═══════════════════════════╩══════════════════════════════════════════╝
 ```
 
-IVF microbenchmark: 28,656 ns avg (34,896 calls/s), AVX2 confirmed.
+Note: local p99 is higher than competition because Docker Desktop adds ~0.5ms overhead.
+Competition hardware (Mac Mini, bare Docker Engine, dedicated) is expected to hit p99 < 1ms.
 
-**Score projection (Mac Mini Intel haswell, 0.45 vCPU per instance):**
+**Why 256 threads?**
 
-```
-IVF search at 0.45 vCPU:    ~24us / 0.45 = ~53us
-write at 0.45 vCPU:          ~9us / 0.45  = ~20us
-parse + norm:                ~3us
-haproxy TCP overhead:        ~30us
-─────────────────────────────────────────────
-p99 estimate (per instance): ~0.11ms
-p99 with 2 instances LB:     ~0.11ms (LB doesn't improve per-req latency)
+Competition test uses `maxVUs: 250`. With haproxy round-robin, each API instance receives
+up to 125 simultaneous keep-alive connections. With fewer threads (e.g. 64), the 61 excess
+connections sit blocked in the accept queue — threads are stuck waiting for new requests on
+existing connections. p99 spikes to >2000ms → detection cut (-3000) + p99 cut (-3000) = -6000.
 
-score_p99 = min(3000, 1000 * log10(1000 / 0.11)) = min(3000, 3959) = 3000
-score_det  = 3000  (IVF K=2048 nprobe=8+24, validated 99.85%+ agreement)
-─────────────────────────────────────────────
-projected final: ~6000 / 6000
-```
+256 threads gives 131 spare threads → all connections serviced immediately → no starvation.
+256 × 256KB stack = 64MB per instance; well within the 160MB limit.
 
 **Optimization path:**
 
 ```
 Brute-force f32                →  ~3ms, baseline
-+ IVF K=2048 nprobe=8          →  ~1.5ms  (2x: cluster pruning)
-+ AoSoA16 @Vector(16,i16) SIMD →  ~0.72ms (2x: AVX2 distance compute)
++ IVF K=2048 nprobe=8          →  ~1.5ms   (2x: cluster pruning)
++ AoSoA16 @Vector(16,i16) SIMD →  ~0.72ms  (2x: AVX2 distance compute)
 + TCP_NODELAY                  →  eliminated Nagle buffering
 + comptime responses           →  eliminates all runtime formatting
 + HTTP keep-alive              →  no TCP handshake per request
-+ nearestCentroids max-heap    →  29us IVF (was 35us): O(K*log(np)) vs O(K*np)
++ nearestCentroids max-heap    →  O(K*log(np)) vs O(K*np)
++ nprobe 8→16 / 24→48          →  100% accuracy on all 54100 test entries
++ threads 64→256               →  eliminates starvation at maxVUs=250
 ```
 
-The dominant gain: IVF cluster pruning (visits 0.39% of vectors) + AoSoA16 SIMD
+The dominant gain: IVF cluster pruning (visits 0.78% of vectors) + AoSoA16 SIMD
 (16 distances computed per VMOVDQU + VPMULLW cycle at no extra cost).
 
 ---

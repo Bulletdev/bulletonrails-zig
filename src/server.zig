@@ -1,5 +1,5 @@
 // HTTP/1.1 request parser and pre-built response writer.
-// Phase 2: blocking reads, keep-close semantics, all responses pre-built at comptime.
+// Phase 2: blocking reads, keep-alive semantics, all responses pre-built at comptime.
 
 const std = @import("std");
 
