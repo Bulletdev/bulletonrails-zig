@@ -54,4 +54,14 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(bench_parse);
+
+    const test_norm = b.addExecutable(.{
+        .name = "test_norm",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/test_norm.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(test_norm);
 }

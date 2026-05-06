@@ -117,7 +117,8 @@ fn checkKnownMerchant(buf: []const u8, merch_id: []const u8) bool {
     const p = std.mem.indexOf(u8, buf, key) orelse return false;
     const after = buf[p + key.len ..];
     const bracket = std.mem.indexOfScalar(u8, after, '[') orelse return false;
-    const array = after[bracket..];
+    const close = std.mem.indexOfScalarPos(u8, after, bracket, ']') orelse after.len;
+    const array = after[bracket..close]; // bounded to the array only
     var pos: usize = 1;
     while (pos < array.len) {
         const q = std.mem.indexOfScalarPos(u8, array, pos, '"') orelse break;
