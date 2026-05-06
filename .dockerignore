@@ -1,0 +1,7 @@
+zig-out/
+.zig-cache/
+.git/
+*.md
+haproxy/
+build_index
+validate_index

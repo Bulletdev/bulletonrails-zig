@@ -1,0 +1,39 @@
+name: rinha-zig
+
+services:
+  haproxy:
+    image: haproxy:3.0-alpine
+    volumes:
+      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    ports:
+      - "9999:9999"
+    depends_on:
+      - api1
+      - api2
+    deploy:
+      resources:
+        limits:
+          cpus: "0.10"
+          memory: "20MB"
+
+  api1:
+    image: michaelbullet/bulletonrails-zig:latest
+    hostname: api1
+    expose:
+      - "9999"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.45"
+          memory: "160MB"
+
+  api2:
+    image: michaelbullet/bulletonrails-zig:latest
+    hostname: api2
+    expose:
+      - "9999"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.45"
+          memory: "160MB"
