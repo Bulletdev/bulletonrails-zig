@@ -19,7 +19,7 @@ services:
       - backend
 
   api1:
-    image: michaelbullet/bulletonrails-zig:v10
+    image: michaelbullet/bulletonrails-zig:v11
     hostname: api1
     expose:
       - "9999"
@@ -32,7 +32,7 @@ services:
       - backend
 
   api2:
-    image: michaelbullet/bulletonrails-zig:v10
+    image: michaelbullet/bulletonrails-zig:v11
     hostname: api2
     expose:
       - "9999"
