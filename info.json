@@ -1,0 +1,7 @@
+{
+    "participants": ["Michael D."],
+    "social": ["https://github.com/Bulletdev"],
+    "source-code-repo": "https://github.com/Bulletdev/bulletonrails-zig",
+    "stack": ["zig", "haproxy", "ivf-simd", "avx2"],
+    "open_to_work": false
+}
