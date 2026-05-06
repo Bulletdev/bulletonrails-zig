@@ -12,7 +12,7 @@ pub const Request = struct {
 };
 
 const CONTENT_TYPE = "Content-Type: application/json\r\n";
-const CONN_CLOSE = "Connection: close\r\n\r\n";
+const CONN_KEEP = "Connection: keep-alive\r\n\r\n";
 
 const BODIES = [6][]const u8{
     "{\"approved\":true,\"fraud_score\":0.0}",
@@ -29,22 +29,22 @@ const FRAUD_RESPONSES = blk: {
     var r: [6][]const u8 = undefined;
     for (&r, BODIES) |*rsp, body| {
         const cl = std.fmt.comptimePrint("{d}", .{body.len});
-        rsp.* = hdr_prefix ++ cl ++ "\r\n" ++ CONN_CLOSE ++ body;
+        rsp.* = hdr_prefix ++ cl ++ "\r\n" ++ CONN_KEEP ++ body;
     }
     break :blk r;
 };
 
 const READY_RESPONSE =
     "HTTP/1.1 200 OK\r\n" ++ CONTENT_TYPE ++
-    "Content-Length: 2\r\n" ++ CONN_CLOSE ++ "OK";
+    "Content-Length: 2\r\n" ++ CONN_KEEP ++ "OK";
 
 const BAD_REQUEST =
     "HTTP/1.1 400 Bad Request\r\n" ++ CONTENT_TYPE ++
-    "Content-Length: 0\r\n" ++ CONN_CLOSE;
+    "Content-Length: 0\r\n" ++ CONN_KEEP;
 
 const NOT_FOUND =
     "HTTP/1.1 404 Not Found\r\n" ++ CONTENT_TYPE ++
-    "Content-Length: 0\r\n" ++ CONN_CLOSE;
+    "Content-Length: 0\r\n" ++ CONN_KEEP;
 
 pub fn setTcpNoDelay(stream: std.net.Stream) void {
     const one: c_int = 1;
