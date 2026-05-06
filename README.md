@@ -48,13 +48,13 @@
 
 ## 01 · What is this
 
-Submission for [Rinha de Backend 2026](https://github.com/zanfranceschi/rinha-de-backend-2026) — a competition to build a fraud detection API under extreme resource constraints.
+Submission for [Rinha de Backend 2026](https://github.com/zanfranceschi/rinha-de-backend-2026) - a competition to build a fraud detection API under extreme resource constraints.
 
-The challenge: build an API that receives a card transaction and decides — in real time — whether it is fraudulent, using vector similarity search against 100k labeled reference transactions.
+The challenge: build an API that receives a card transaction and decides - in real time - whether it is fraudulent, using vector similarity search against 100k labeled reference transactions.
 
 This submission proves that **Zig can target 6000/6000** in performance-sensitive scenarios.
 No allocations on the hot path. No GC. No runtime. The IVF index is embedded at compile time
-via `@embedFile` — zero cold-start, zero disk I/O on startup. SIMD distance computation uses
+via `@embedFile` - zero cold-start, zero disk I/O on startup. SIMD distance computation uses
 `@Vector(16, i16)` with AVX2 on every CPU cycle that matters.
 
 ---
@@ -75,11 +75,11 @@ POST /fraud-score
   normalizer.zig
   ─────────────────
   Port of VectorNormalizer Ruby, identical formulas.
-  Rata Die DOW formula — no std.time, no libc dependency.
+  Rata Die DOW formula - no std.time, no libc dependency.
   Output: [14]f32 in [0,1] with sentinel -1.0 for absent last_transaction.
         │
         ▼
-  index.zig — IvfIndex.search()
+  index.zig - IvfIndex.search()
   ─────────────────
   1. Quantize query to [14]i16 (SCALE=5000)
   2. Find nprobe=8 nearest centroids (f32 distance, sequential scan)
@@ -89,11 +89,11 @@ POST /fraud-score
   5. Return fraud_count (0..5)
         │
         ▼
-  server.zig — pre-built comptime responses
+  server.zig - pre-built comptime responses
   ─────────────────
   All 6 possible responses built at comptime via std.fmt.comptimePrint.
   Single writeAll per request. TCP_NODELAY eliminates Nagle buffering.
-  Connection: keep-alive — request loop handles N requests per connection.
+  Connection: keep-alive - request loop handles N requests per connection.
         │
         ▼
   { "approved": bool, "fraud_score": float }
@@ -107,7 +107,7 @@ POST /fraud-score
 |  1  | `installments`          | `clamp(installments / 12)`               |
 |  2  | `amount_vs_avg`         | `clamp((amount / avg_amount) / 10)`      |
 |  3  | `hour_of_day`           | `utc_hour / 23`                          |
-|  4  | `day_of_week`           | `(wday + 6) % 7 / 6` — Mon=0, Sun=6      |
+|  4  | `day_of_week`           | `(wday + 6) % 7 / 6` - Mon=0, Sun=6      |
 |  5  | `minutes_since_last_tx` | `clamp(minutes / 1440)` or `-1` if null  |
 |  6  | `km_from_last_tx`       | `clamp(km / 1000)` or `-1` if null       |
 |  7  | `km_from_home`          | `clamp(km_from_home / 1000)`             |
@@ -161,13 +161,13 @@ sum over 14 dims = 1.4e9 (fits i32). No overflow possible.
 ║  LAYER               ║  CHOICE                                            ║
 ╠══════════════════════╬════════════════════════════════════════════════════╣
 ║  Language            ║  Zig 0.15.2                                        ║
-║  HTTP server         ║  Custom — blocking TCP, 4 threads, keep-alive      ║
+║  HTTP server         ║  Custom - blocking TCP, 4 threads, keep-alive      ║
 ║  KNN search          ║  IVF K=2048 nprobe=8 (boundary: 24), AoSoA16 SIMD  ║
-║  Numeric core        ║  @Vector(16, i16) — AVX2 native, no deps           ║
-║  JSON                ║  Custom zero-alloc scanner — std.mem.indexOf only  ║
-║  Load balancer       ║  haproxy 3.0-alpine — TCP mode, roundrobin         ║
-║  Binary              ║  Static musl, ~5 MB — FROM scratch final image     ║
-║  Index               ║  @embedFile at compile time — zero cold-start      ║
+║  Numeric core        ║  @Vector(16, i16) - AVX2 native, no deps           ║
+║  JSON                ║  Custom zero-alloc scanner - std.mem.indexOf only  ║
+║  Load balancer       ║  haproxy 3.0-alpine - TCP mode, roundrobin         ║
+║  Binary              ║  Static musl, ~5 MB - FROM scratch final image     ║
+║  Index               ║  @embedFile at compile time - zero cold-start      ║
 ╚══════════════════════╩════════════════════════════════════════════════════╝
 ```
 
@@ -176,7 +176,7 @@ sum over 14 dims = 1.4e9 (fits i32). No overflow possible.
 The `comptime` argument is central. The reference C implementation pre-computes the IVF index
 in Python and includes a `.bin` blob. In Zig, `@embedFile` does the same with type safety:
 the index is an embedded `[]const u8` slice, parsed at startup into a fully typed `IvfIndex`
-struct — no runtime file I/O, no cold-start penalty.
+struct - no runtime file I/O, no cold-start penalty.
 
 `@Vector` intrinsics compile to AVX2 instructions directly without the verbosity of C
 intrinsics or Rust's `std::arch` unsafe blocks. Zig's `inline for` over 14 dimensions
@@ -250,7 +250,7 @@ git clone https://github.com/bulletdev/bulletonrails-zig
 cd bulletonrails-zig
 
 # Build and run
-# index.bin is committed — Docker build skips the ~90s index generation step
+# index.bin is committed - Docker build skips the ~90s index generation step
 docker compose up --build -d
 
 # Wait for ready
@@ -302,7 +302,7 @@ zig build --release=fast -Dcpu=native   # optimized for your CPU
 <summary><kbd>▶ see details (click to expand)</kbd></summary>
 
 ```bash
-# legit — expected: {"approved":true,"fraud_score":0.0}
+# legit - expected: {"approved":true,"fraud_score":0.0}
 curl -s -X POST http://localhost:9999/fraud-score \
   -H 'Content-Type: application/json' \
   -d '{
@@ -314,7 +314,7 @@ curl -s -X POST http://localhost:9999/fraud-score \
     "last_transaction": null
   }'
 
-# fraud — expected: {"approved":false,"fraud_score":1.0}
+# fraud - expected: {"approved":false,"fraud_score":1.0}
 curl -s -X POST http://localhost:9999/fraud-score \
   -H 'Content-Type: application/json' \
   -d '{
@@ -385,7 +385,7 @@ Score formula: `final = score_p99 + score_det`
 ╚════════════╩══════════════════════════╩═══════════╩════════════════════════╝
 ```
 
-**Current benchmark — local dev machine (full CPU, not throttled):**
+**Current benchmark - local dev machine (full CPU, not throttled):**
 
 ```
 ╔═══════════════════════════════════════════════════════════════╗
