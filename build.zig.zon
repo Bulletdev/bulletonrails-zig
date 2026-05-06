@@ -1,0 +1,8 @@
+.{
+    .name = .bulletonrails_zig,
+    .fingerprint = 0xe2e7ee9aa57aab67,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.15.0",
+    .dependencies = .{},
+    .paths = .{"."},
+}

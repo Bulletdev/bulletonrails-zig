@@ -1,0 +1,4 @@
+.zig-cache/
+zig-out/
+build_index
+validate_index
